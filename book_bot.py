@@ -1,16 +1,33 @@
 #!/usr/bin/env python3
-import os, re, json, time, html as H
+"""Book Summary Auto Poster: RSS -> OpenRouter free models -> Blogger."""
+import os
+import re
+import json
+import time
+import html as H
 from concurrent.futures import ThreadPoolExecutor
 from urllib.parse import urljoin
-import requests, feedparser
+
+import requests
+import feedparser
 from bs4 import BeautifulSoup
 
 CATEGORIES = [
-    "Non-Fiction", "Business & Investing", "Self-Help & Self-Improvement",
-    "Psychology", "Philosophy", "Science & Technology", "Biography & Memoir",
-    "History", "Fiction", "Classics", "Sci-Fi & Fantasy", "Personal Finance",
+    "Non-Fiction",
+    "Business & Investing",
+    "Self-Help & Self-Improvement",
+    "Psychology",
+    "Philosophy",
+    "Science & Technology",
+    "Biography & Memoir",
+    "History",
+    "Fiction",
+    "Classics",
+    "Sci-Fi & Fantasy",
+    "Personal Finance",
     "Productivity & Time Management",
 ]
+
 KW = {
     "Non-Fiction": ["nonfiction", "non-fiction", "essays", "reportage", "investigation", "true story", "journalist"],
     "Business & Investing": ["business", "investing", "investor", "entrepreneur", "startup", "economy", "economics", "management", "leadership", "marketing", "wall street", "stock", "capital", "ceo", "market"],
@@ -27,17 +44,25 @@ KW = {
     "Productivity & Time Management": ["productivity", "time management", "focus", "procrastination", "deep work", "getting things done", "workflow", "organize", "efficiency", "routine"],
 }
 
-BATCH = int(os.getenv("POSTS_PER_CATEGORY", "5"))   # প্রতি ক্যাটাগরিতে কয়টা পোস্ট, তারপর পরের ক্যাটাগরি
+BATCH = int(os.getenv("POSTS_PER_CATEGORY", "5") or "5")
 MAX_ATTEMPTS = 10
 STATE_FILE = "book_state.json"
+FEEDS_FILE = "book_feeds.txt"
 START = time.time()
 DEADLINE = 40 * 60
-HEAD = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36"}
-BOOKISH = re.compile(r"\b(book|books|novel|memoir|author|biography|autobiography|essays|poems|stories|read|reading|review|publish\w*)\b", re.I)
-BAD_IMG = re.compile(r"(logo|avatar|icon|sprite|pixel|1x1|blank|placeholder|gravatar|badge|\.svg|\.gif)", re.I)
+HEAD = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                  "(KHTML, like Gecko) Chrome/120 Safari/537.36"
+}
+BOOKISH = re.compile(
+    r"\b(book|books|novel|memoir|author|biography|autobiography|essays|poems|"
+    r"stories|read|reading|review|publish\w*)\b", re.I)
+BAD_IMG = re.compile(
+    r"(logo|avatar|icon|sprite|pixel|1x1|blank|placeholder|gravatar|badge|\.svg|\.gif)", re.I)
 OR_KEY = os.getenv("OPENROUTER_API_KEY", "")
 
 
+# ---------------------------------------------------------------- state
 def load_state():
     try:
         with open(STATE_FILE, encoding="utf-8") as f:
@@ -55,12 +80,14 @@ def save_state(s):
         json.dump(s, f, ensure_ascii=False, indent=1)
 
 
+# ---------------------------------------------------------------- feeds
 def text_of(h):
     return BeautifulSoup(h or "", "html.parser").get_text(" ", strip=True)
 
 
 def load_feeds():
-    txt = open("book_feeds.txt", encoding="utf-8").read()
+    with open(FEEDS_FILE, encoding="utf-8") as f:
+        txt = f.read()
     urls = re.findall(r"\((https?://[^)\s]+)\)", txt)
     if not urls:
         urls = re.findall(r"https?://[^\s\]\)]+", txt)
@@ -74,9 +101,13 @@ def feed_images(e, link):
             if m.get("url"):
                 urls.append(m["url"])
     for l in (e.get("links", []) or []) + (e.get("enclosures", []) or []):
-        if str(l.get("type", "")).startswith("image") and (l.get("href") or l.get("url")):
-            urls.append(l.get("href") or l.get("url"))
-    blobs = [e.get("summary", "")] + [c.get("value", "") for c in e.get("content", []) or []]
+        if str(l.get("type", "")).startswith("image"):
+            u = l.get("href") or l.get("url")
+            if u:
+                urls.append(u)
+    blobs = [e.get("summary", "")]
+    for c in e.get("content", []) or []:
+        blobs.append(c.get("value", ""))
     for b in blobs:
         for i in BeautifulSoup(b or "", "html.parser").find_all("img"):
             src = i.get("src") or i.get("data-src")
@@ -93,23 +124,38 @@ def fetch_feed(url):
         return []
     out = []
     for e in d.entries[:25]:
-        link, title = e.get("link"), text_of(e.get("title", ""))
+        link = e.get("link")
+        title = text_of(e.get("title", ""))
         if not link or not title:
             continue
-        ts = time.mktime(e.published_parsed) if e.get("published_parsed") else 0
+        ts = 0
+        if e.get("published_parsed"):
+            try:
+                ts = time.mktime(e.published_parsed)
+            except Exception:
+                ts = 0
         out.append({
-            "title": title, "link": link,
+            "title": title,
+            "link": link,
             "feed": d.feed.get("title", url),
             "summary": text_of(e.get("summary", "")),
-            "images": feed_images(e, link), "ts": ts,
+            "images": feed_images(e, link),
+            "ts": ts,
         })
     return out
 
 
 def scores(x):
     t = ((x["title"] + " ") * 2 + x["summary"][:1500]).lower()
-    return [sum(len(re.findall(r"\b" + re.escape(k) + r"\b", t)) for k in KW[c]) for c in CATEGORIES]
-  def fetch_page(link):
+    result = []
+    for c in CATEGORIES:
+        total = 0
+        for k in KW[c]:
+            total += len(re.findall(r"\b" + re.escape(k) + r"\b", t))
+        result.append(total)
+    return result
+    # ---------------------------------------------------------------- images
+def fetch_page(link):
     try:
         r = requests.get(link, headers=HEAD, timeout=25)
         if r.status_code != 200:
@@ -128,7 +174,8 @@ def scores(x):
         if src:
             imgs.append(urljoin(link, src))
     paras = [p.get_text(" ", strip=True) for p in art.find_all("p")]
-    return " ".join(p for p in paras if len(p) > 40)[:6000], imgs
+    text = " ".join(p for p in paras if len(p) > 40)[:6000]
+    return text, imgs
 
 
 def valid_image(u):
@@ -144,15 +191,17 @@ def valid_image(u):
         return False
 
 
+# ---------------------------------------------------------------- AI
 def free_models():
     ms = []
-    if os.getenv("OPENROUTER_MODEL", "").strip():
-        ms.append(os.getenv("OPENROUTER_MODEL").strip())
+    pref = os.getenv("OPENROUTER_MODEL", "").strip()
+    if pref:
+        ms.append(pref)
     ms.append("openrouter/free")
     try:
         data = requests.get("https://openrouter.ai/api/v1/models", timeout=30).json()["data"]
-        fr = sorted([m for m in data if m["id"].endswith(":free")],
-                    key=lambda m: -(m.get("context_length") or 0))
+        fr = [m for m in data if str(m.get("id", "")).endswith(":free")]
+        fr.sort(key=lambda m: -(m.get("context_length") or 0))
         ms += [m["id"] for m in fr[:6]]
     except Exception as ex:
         print("model list error:", ex)
@@ -162,51 +211,66 @@ def free_models():
 def ask(model, system, user):
     r = requests.post(
         "https://openrouter.ai/api/v1/chat/completions",
-        headers={"Authorization": "Bearer " + OR_KEY, "Content-Type": "application/json",
-                 "HTTP-Referer": "https://github.com", "X-Title": "Book Summary Bot"},
-        json={"model": model, "temperature": 0.7, "max_tokens": 5000,
-              "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}]},
-        timeout=300)
+        headers={
+            "Authorization": "Bearer " + OR_KEY,
+            "Content-Type": "application/json",
+            "HTTP-Referer": "https://github.com",
+            "X-Title": "Book Summary Bot",
+        },
+        json={
+            "model": model,
+            "temperature": 0.7,
+            "max_tokens": 5000,
+            "messages": [
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ],
+        },
+        timeout=300,
+    )
     r.raise_for_status()
     return r.json()["choices"][0]["message"]["content"] or ""
 
 
-SYSTEM = ("You are an expert SEO book blogger. You write original, engaging, well-structured "
-          "English blog posts that summarize and review books. Never invent quotes, ISBNs, dates "
-          "or facts that are not supported by the source or by well-established knowledge.")
+SYSTEM = (
+    "You are an expert SEO book blogger. You write original, engaging, well-structured "
+    "English blog posts that summarize and review books. Never invent quotes, ISBNs, "
+    "dates or facts that are not supported by the source or by well-established knowledge."
+)
 
 
 def build_prompt(x, cat, text, n_img):
-    return f"""Write a complete SEO-optimized blog post for a book blog.
-
-CATEGORY: {cat}
-SOURCE HEADLINE: {x['title']}
-SOURCE (from {x['feed']}):
-{text[:5500]}
-
-RULES:
-- Identify the book (or books) the source is about and write an original summary/review post. Do NOT copy sentences from the source; rewrite everything in your own words.
-- If it is fiction, avoid major spoilers. If the source is not about one specific book, write a helpful book-focused article (reading guide / key ideas) in the same category.
-- Length: 1200-1800 words. Natural keyword use, short paragraphs, scannable.
-- Output ONLY in this exact format (no markdown, no code fences):
-
-TITLE: <SEO title, max 62 characters, includes the book name and a hook like "Summary", "Review" or "Key Ideas">
-DESCRIPTION: <meta description, max 150 characters>
-===BODY===
-<HTML fragment only: use <h2>, <h3>, <p>, <ul>, <li>, <strong>, <em>, <blockquote>. No <h1>, no <html>/<body>.>
-
-BODY STRUCTURE (in this order):
-1. [[IMAGE_1]] on its own line first, then a hooking introduction.
-2. <h2>Book at a Glance</h2> (title, author, genre/category, and only details present in the source)
-3. <h2>Quick Summary</h2>
-4. <h2>Key Ideas and Themes</h2> with several <h3> sub-points
-5. <h2>Who Should Read This Book</h2>
-6. <h2>Strengths and Criticisms</h2>
-7. <h2>Key Takeaways</h2> as a bulleted list
-8. <h2>Frequently Asked Questions</h2> with 3 questions as <h3> and answers as <p>
-9. <h2>Final Thoughts</h2>
-
-IMAGES: there are {n_img} images. Put the placeholders [[IMAGE_1]] .. [[IMAGE_{n_img}]] each on its own line, spread between sections (IMAGE_1 at the very top)."""
+    return (
+        "Write a complete SEO-optimized blog post for a book blog.\n\n"
+        f"CATEGORY: {cat}\n"
+        f"SOURCE HEADLINE: {x['title']}\n"
+        f"SOURCE (from {x['feed']}):\n{text[:5500]}\n\n"
+        "RULES:\n"
+        "- Identify the book (or books) the source is about and write an original summary/review post. "
+        "Do NOT copy sentences from the source; rewrite everything in your own words.\n"
+        "- If it is fiction, avoid major spoilers. If the source is not about one specific book, "
+        "write a helpful book-focused article (reading guide / key ideas) in the same category.\n"
+        "- Length: 1200-1800 words. Natural keyword use, short paragraphs, scannable.\n"
+        "- Output ONLY in this exact format (no markdown, no code fences):\n\n"
+        "TITLE: <SEO title, max 62 characters, includes the book name and a hook such as "
+        "Summary, Review or Key Ideas>\n"
+        "DESCRIPTION: <meta description, max 150 characters>\n"
+        "===BODY===\n"
+        "<HTML fragment only: use <h2>, <h3>, <p>, <ul>, <li>, <strong>, <em>, <blockquote>. "
+        "No <h1>, no <html>/<body>.>\n\n"
+        "BODY STRUCTURE (in this order):\n"
+        "1. [[IMAGE_1]] on its own line first, then a hooking introduction.\n"
+        "2. <h2>Book at a Glance</h2> (title, author, genre/category, and only details present in the source)\n"
+        "3. <h2>Quick Summary</h2>\n"
+        "4. <h2>Key Ideas and Themes</h2> with several <h3> sub-points\n"
+        "5. <h2>Who Should Read This Book</h2>\n"
+        "6. <h2>Strengths and Criticisms</h2>\n"
+        "7. <h2>Key Takeaways</h2> as a bulleted list\n"
+        "8. <h2>Frequently Asked Questions</h2> with 3 questions as <h3> and answers as <p>\n"
+        "9. <h2>Final Thoughts</h2>\n\n"
+        f"IMAGES: there are {n_img} images. Put the placeholders [[IMAGE_1]] .. [[IMAGE_{n_img}]] "
+        "each on its own line, spread between sections (IMAGE_1 at the very top)."
+    )
 
 
 def parse(raw):
@@ -214,6 +278,7 @@ def parse(raw):
     m = re.search(r"TITLE:\s*(.+)", raw)
     d = re.search(r"DESCRIPTION:\s*(.+)", raw)
     if "===BODY===" not in raw or not m:
+        print("rejected: format not followed")
         return None
     body = raw.split("===BODY===", 1)[1].strip()
     body = re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", body)
@@ -222,16 +287,18 @@ def parse(raw):
     desc = (d.group(1).strip() if d else "")[:150]
     words = len(text_of(body).split())
     if words < 700 or "<h2" not in body or "<p" not in body:
-        print("rejected: too short/bad structure", words)
+        print("rejected: too short or bad structure, words =", words)
         return None
     return title, desc, body
 
 
 def figure(u, alt):
     a = H.escape(alt, quote=True)
-    return ('<figure style="text-align:center;margin:24px 0">'
-            f'<img src="{u}" alt="{a}" style="max-width:100%;height:auto;border-radius:8px"/>'
-            f'<figcaption style="font-size:13px;color:#666">{a}</figcaption></figure>')
+    return (
+        '<figure style="text-align:center;margin:24px 0">'
+        f'<img src="{u}" alt="{a}" style="max-width:100%;height:auto;border-radius:8px"/>'
+        f'<figcaption style="font-size:13px;color:#666">{a}</figcaption></figure>'
+    )
 
 
 def finalize(body, imgs, title, x):
@@ -240,15 +307,18 @@ def finalize(body, imgs, title, x):
     body = re.sub(r"\[\[IMAGE_\d+\]\]", "", body)
     if imgs[0] not in body:
         body = figure(imgs[0], title) + body
-    body += (f'<hr/><p><em>Source and further reading: <a href="{x["link"]}" rel="nofollow noopener" '
-             f'target="_blank">{H.escape(x["feed"])}</a></em></p>')
+    body += (
+        '<hr/><p><em>Source and further reading: '
+        f'<a href="{x["link"]}" rel="nofollow noopener" target="_blank">{H.escape(x["feed"])}</a>'
+        '</em></p>'
+    )
     return body
 
 
 def make_post(x, cat, models):
     text, pimgs = fetch_page(x["link"])
     imgs = []
-    for u in dict.fromkeys(x["images"] + pimgs):   # আগে RSS-এর ছবি
+    for u in dict.fromkeys(x["images"] + pimgs):  # RSS images first
         if valid_image(u):
             imgs.append(u)
         if len(imgs) >= 4:
@@ -273,21 +343,32 @@ def make_post(x, cat, models):
             print("model error:", model, str(ex)[:150])
             time.sleep(3)
     return None
-  def blogger_token():
-    r = requests.post("https://oauth2.googleapis.com/token", data={
-        "client_id": os.environ["BLOGGER_CLIENT_ID"],
-        "client_secret": os.environ["BLOGGER_CLIENT_SECRET"],
-        "refresh_token": os.environ["BLOGGER_REFRESH_TOKEN"],
-        "grant_type": "refresh_token"}, timeout=30)
+    # ---------------------------------------------------------------- Blogger
+def blogger_token():
+    r = requests.post(
+        "https://oauth2.googleapis.com/token",
+        data={
+            "client_id": os.environ["BLOGGER_CLIENT_ID"],
+            "client_secret": os.environ["BLOGGER_CLIENT_SECRET"],
+            "refresh_token": os.environ["BLOGGER_REFRESH_TOKEN"],
+            "grant_type": "refresh_token",
+        },
+        timeout=30,
+    )
     r.raise_for_status()
     return r.json()["access_token"]
 
 
 def publish(token, title, content, label, desc):
-    url = f"https://www.googleapis.com/blogger/v3/blogs/{os.environ['BLOG_ID']}/posts/"
-    payload = {"kind": "blogger#post", "title": title, "content": content,
-               "labels": [label], "customMetaData": desc}
-    for i in range(3):
+    url = "https://www.googleapis.com/blogger/v3/blogs/%s/posts/" % os.environ["BLOG_ID"]
+    payload = {
+        "kind": "blogger#post",
+        "title": title,
+        "content": content,
+        "labels": [label],
+        "customMetaData": desc,
+    }
+    for _ in range(3):
         try:
             r = requests.post(url, headers={"Authorization": "Bearer " + token},
                               json=payload, timeout=60)
@@ -301,6 +382,7 @@ def publish(token, title, content, label, desc):
     return False
 
 
+# ---------------------------------------------------------------- main
 def main():
     state = load_state()
     posted = set(state["posted"])
@@ -308,7 +390,9 @@ def main():
     print("feeds:", len(feeds))
     with ThreadPoolExecutor(12) as ex:
         lists = list(ex.map(fetch_feed, feeds))
-    seen, fresh = set(), []
+
+    seen = set()
+    fresh = []
     for x in [i for l in lists for i in l]:
         if x["link"] in posted or x["link"] in seen:
             continue
@@ -319,21 +403,23 @@ def main():
         fresh.append(x)
     print("fresh candidates:", len(fresh))
 
-    N = len(CATEGORIES)
-    ci = state["cat_index"]
+    n = len(CATEGORIES)
+    ci = state["cat_index"] % n
     plan = []
-    for off in range(N):
-        c = (ci + off) % N
-        cands = sorted([x for x in fresh if x["sc"][c] > 0],
-                       key=lambda x: (bool(x["images"]), x["sc"][c], x["ts"]), reverse=True)
+    for off in range(n):
+        c = (ci + off) % n
+        cands = [x for x in fresh if x["sc"][c] > 0]
+        cands.sort(key=lambda x: (bool(x["images"]), x["sc"][c], x["ts"]), reverse=True)
         plan += [(c, x) for x in cands[:3]]
-    rest = sorted([x for x in fresh if max(x["sc"]) == 0], key=lambda x: x["ts"], reverse=True)
+    rest = [x for x in fresh if max(x["sc"]) == 0]
+    rest.sort(key=lambda x: x["ts"], reverse=True)
     plan += [(ci, x) for x in rest[:5]]
 
     models = free_models()
     print("models:", models)
     token = blogger_token()
-    tried, attempts = set(), 0
+    tried = set()
+    attempts = 0
     for c, x in plan:
         if attempts >= MAX_ATTEMPTS or time.time() - START > DEADLINE:
             break
@@ -341,7 +427,7 @@ def main():
             continue
         tried.add(x["link"])
         attempts += 1
-        print(f"[{attempts}] {CATEGORIES[c]} | {x['title']}")
+        print("[%d] %s | %s" % (attempts, CATEGORIES[c], x["title"]))
         res = make_post(x, CATEGORIES[c], models)
         if not res:
             continue
@@ -351,9 +437,11 @@ def main():
             if c == state["cat_index"]:
                 state["count"] += 1
             else:
-                state["cat_index"], state["count"] = c, 1
+                state["cat_index"] = c
+                state["count"] = 1
             if state["count"] >= BATCH:
-                state["cat_index"], state["count"] = (c + 1) % N, 0
+                state["cat_index"] = (c + 1) % n
+                state["count"] = 0
             save_state(state)
             return 0
     print("No post published this run")
