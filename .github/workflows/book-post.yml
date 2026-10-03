@@ -18,11 +18,18 @@ jobs:
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
           cache: pip
-      - run: pip install -r requirements.txt
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Syntax check
+        run: python -m py_compile book_bot.py
+
       - name: Run bot
         run: python book_bot.py
         env:
@@ -32,9 +39,11 @@ jobs:
           BLOGGER_CLIENT_SECRET: ${{ secrets.BLOGGER_CLIENT_SECRET }}
           BLOGGER_REFRESH_TOKEN: ${{ secrets.BLOGGER_REFRESH_TOKEN }}
           POSTS_PER_CATEGORY: "5"
+
       - name: Save state
         if: always()
         run: |
+          [ -f book_state.json ] || echo '{"cat_index":0,"count":0,"posted":[]}' > book_state.json
           git config user.name "book-bot"
           git config user.email "book-bot@users.noreply.github.com"
           git add book_state.json
