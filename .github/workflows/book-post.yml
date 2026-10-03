@@ -1,0 +1,41 @@
+name: Book Summary Auto Post
+
+on:
+  schedule:
+    - cron: "0 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: book-post
+  cancel-in-progress: false
+
+jobs:
+  post:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - run: pip install -r requirements.txt
+      - name: Run bot
+        run: python book_bot.py
+        env:
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          BLOG_ID: ${{ secrets.BLOG_ID }}
+          BLOGGER_CLIENT_ID: ${{ secrets.BLOGGER_CLIENT_ID }}
+          BLOGGER_CLIENT_SECRET: ${{ secrets.BLOGGER_CLIENT_SECRET }}
+          BLOGGER_REFRESH_TOKEN: ${{ secrets.BLOGGER_REFRESH_TOKEN }}
+          POSTS_PER_CATEGORY: "5"
+      - name: Save state
+        if: always()
+        run: |
+          git config user.name "book-bot"
+          git config user.email "book-bot@users.noreply.github.com"
+          git add book_state.json
+          git diff --cached --quiet || (git commit -m "update state" && git pull --rebase && git push)
